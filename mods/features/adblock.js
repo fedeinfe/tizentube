@@ -13,33 +13,119 @@ import { t } from 'i18next';
  * This in turn calls the following snippet:
  * https://github.com/gorhill/uBlock/blob/bfdc81e9e400f7b78b2abc97576c3d7bf3a11a0b/assets/resources/scriptlets.js#L365-L470
  *
- * Seems like for now dropping just the adPlacements is enough for YouTube TV
+ * The ad data is not always at the top level of the response: it can also be
+ * nested in a `playerResponse` (watch/next and prefetch responses) or come in
+ * batched array responses, so prune all of those like uBlock Origin does.
  */
-const origParse = JSON.parse;
-JSON.parse = function () {
-  const r = origParse.apply(this, arguments);
+const AD_KEYS = ['adPlacements', 'adSlots', 'playerAds'];
+const AD_RENDERERS = ['adSlotRenderer', 'tvMastheadRenderer', 'promotedSparklesWebRenderer'];
+
+function pruneAdKeys(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  for (const key of AD_KEYS) {
+    if (key in obj) delete obj[key];
+  }
+}
+
+function pruneAds(r) {
+  const responses = Array.isArray(r) ? r : [r];
+  for (const response of responses) {
+    if (!response || typeof response !== 'object') continue;
+    pruneAdKeys(response);
+    pruneAdKeys(response.playerResponse);
+    pruneAdKeys(response.response);
+    pruneAdKeys(response.response?.playerResponse);
+  }
+}
+
+function isAdRenderer(elm) {
+  if (!elm || typeof elm !== 'object') return false;
+  return AD_RENDERERS.some((renderer) => elm[renderer]);
+}
+
+// Drop ad renderers from a list of sections/items, and from the horizontal
+// lists and grids it contains. Returns the filtered list.
+function removeAdRenderers(list) {
+  if (!Array.isArray(list)) return list;
+  const filtered = list.filter((elm) => !isAdRenderer(elm));
+  for (const elm of filtered) {
+    const horizontalList = elm?.shelfRenderer?.content?.horizontalListRenderer;
+    if (Array.isArray(horizontalList?.items)) {
+      horizontalList.items = horizontalList.items.filter((item) => !isAdRenderer(item));
+    }
+    if (Array.isArray(elm?.gridRenderer?.items)) {
+      elm.gridRenderer.items = elm.gridRenderer.items.filter((item) => !isAdRenderer(item));
+    }
+  }
+  return filtered;
+}
+
+function removeAdTiles(r) {
+  const surface = r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content;
+  if (surface?.sectionListRenderer?.contents) {
+    surface.sectionListRenderer.contents = removeAdRenderers(surface.sectionListRenderer.contents);
+  }
+  if (surface?.gridRenderer?.items) {
+    surface.gridRenderer.items = removeAdRenderers(surface.gridRenderer.items);
+  }
+
+  const sections = r?.contents?.tvBrowseRenderer?.content?.tvSecondaryNavRenderer?.sections;
+  if (Array.isArray(sections)) {
+    for (const section of sections) {
+      for (const tab of section?.tvSecondaryNavSectionRenderer?.tabs || []) {
+        const content = tab?.tabRenderer?.content?.tvSurfaceContentRenderer?.content;
+        if (content?.sectionListRenderer?.contents) {
+          content.sectionListRenderer.contents = removeAdRenderers(content.sectionListRenderer.contents);
+        }
+        if (content?.gridRenderer?.items) {
+          content.gridRenderer.items = removeAdRenderers(content.gridRenderer.items);
+        }
+      }
+    }
+  }
+
+  // Search results
+  if (r?.contents?.sectionListRenderer?.contents) {
+    r.contents.sectionListRenderer.contents = removeAdRenderers(r.contents.sectionListRenderer.contents);
+  }
+
+  // Related videos under the player
+  const pivot = r?.contents?.singleColumnWatchNextResults?.pivot?.sectionListRenderer;
+  if (pivot?.contents) {
+    pivot.contents = removeAdRenderers(pivot.contents);
+  }
+
+  const continuation = r?.continuationContents;
+  if (continuation?.sectionListContinuation?.contents) {
+    continuation.sectionListContinuation.contents = removeAdRenderers(continuation.sectionListContinuation.contents);
+  }
+  if (continuation?.horizontalListContinuation?.items) {
+    continuation.horizontalListContinuation.items = removeAdRenderers(continuation.horizontalListContinuation.items);
+  }
+  if (continuation?.gridContinuation?.items) {
+    continuation.gridContinuation.items = removeAdRenderers(continuation.gridContinuation.items);
+  }
+
+  // Shorts ads
+  if (Array.isArray(r?.entries)) {
+    r.entries = r.entries.filter(
+      (elm) => !elm?.command?.reelWatchEndpoint?.adClientParams?.isAd && !isAdRenderer(elm)
+    );
+  }
+}
+
+function processResponse(r) {
+  if (!r || typeof r !== 'object') return r;
   try {
     const adBlockEnabled = configRead('enableAdBlock');
     const signinReminderEnabled = configRead('enableSigninReminder');
 
-    if (r?.playbackContext?.contentPlaybackContext) {
-      // Handle inline playback without ads
-      console.log(r.playbackContext.contentPlaybackContext);
+    if (adBlockEnabled) {
+      pruneAds(r);
+      removeAdTiles(r);
     }
 
-    if (r.adPlacements && adBlockEnabled) {
-      r.adPlacements = [];
-    }
-
-    // Also set playerAds to false, just incase.
-    if (r.playerAds && adBlockEnabled) {
-      r.playerAds = false;
-    }
-
-    // Also set adSlots to an empty array, emptying only the adPlacements won't work.
-    if (r.adSlots && adBlockEnabled) {
-      r.adSlots = [];
-    }
+    if (Array.isArray(r)) return r;
 
     if (r.paidContentOverlay && !configRead('enablePaidPromotionOverlay')) {
       r.paidContentOverlay = null;
@@ -56,7 +142,6 @@ JSON.parse = function () {
       }
     }
 
-    // Drop "masthead" ad from home screen
     if (
       r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
         ?.sectionListRenderer?.contents
@@ -66,22 +151,6 @@ JSON.parse = function () {
           r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
             (elm) => !elm.feedNudgeRenderer
           );
-      }
-
-      if (adBlockEnabled) {
-        r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents =
-          r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents.filter(
-            (elm) => !elm.adSlotRenderer
-          );
-
-        for (const shelve of r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents) {
-          if (shelve.shelfRenderer && shelve.shelfRenderer.content?.horizontalListRenderer?.items) {
-            shelve.shelfRenderer.content.horizontalListRenderer.items =
-              shelve.shelfRenderer.content.horizontalListRenderer.items.filter(
-                (item) => !item.adSlotRenderer
-              );
-          }
-        }
       }
 
       processShelves(r.contents.tvBrowseRenderer.content.tvSurfaceContentRenderer.content.sectionListRenderer.contents);
@@ -101,13 +170,6 @@ JSON.parse = function () {
     if (r.messages && Array.isArray(r.messages) && !configRead('enableYouThereRenderer')) {
       r.messages = r.messages.filter(
         (msg) => !msg?.youThereRenderer
-      );
-    }
-
-    // Remove shorts ads
-    if (!Array.isArray(r) && r?.entries && adBlockEnabled) {
-      r.entries = r.entries?.filter(
-        (elm) => !elm?.command?.reelWatchEndpoint?.adClientParams?.isAd
       );
     }
 
@@ -318,14 +380,50 @@ JSON.parse = function () {
   }
 
   return r;
+}
+
+const origParse = JSON.parse;
+JSON.parse = function () {
+  return processResponse(origParse.apply(this, arguments));
 };
+
+// YouTube can also read responses through fetch's Response.json() or an XHR
+// with responseType 'json'. Both are parsed natively without going through
+// JSON.parse, which lets the ads through, so route them to the same filter.
+if (typeof Response !== 'undefined' && Response.prototype && Response.prototype.text) {
+  const origText = Response.prototype.text;
+  Response.prototype.json = function () {
+    return origText.call(this).then((text) => JSON.parse(text));
+  };
+}
+
+if (typeof XMLHttpRequest !== 'undefined') {
+  const responseDescriptor = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
+  if (responseDescriptor && responseDescriptor.get && responseDescriptor.configurable) {
+    // The same response object is returned on every read, only process it once.
+    const processedResponses = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+    Object.defineProperty(XMLHttpRequest.prototype, 'response', {
+      configurable: true,
+      enumerable: responseDescriptor.enumerable,
+      get: function () {
+        const response = responseDescriptor.get.call(this);
+        if (this.responseType !== 'json' || !response || typeof response !== 'object') return response;
+        if (processedResponses) {
+          if (processedResponses.has(response)) return response;
+          processedResponses.add(response);
+        }
+        return processResponse(response);
+      }
+    });
+  }
+}
 
 // Fix playback issues
 
 const origStringify = JSON.stringify;
 JSON.stringify = function (value, replacer, space) {
   if (value?.playbackContext?.contentPlaybackContext) {
-    const copiedValue = JSON.parse(origStringify(value));
+    const copiedValue = origParse(origStringify(value));
     if (!copiedValue.playbackContext.contentPlaybackContext.isInlinePlaybackNoAd) {
       copiedValue.playbackContext.contentPlaybackContext.isInlinePlaybackNoAd = true;
       return origStringify.call(this, copiedValue, replacer, space);
@@ -399,11 +497,7 @@ function addPreviews(items) {
 
 function deArrowify(items) {
   for (const item of items) {
-    if (item.adSlotRenderer) {
-      const index = items.indexOf(item);
-      items.splice(index, 1);
-      continue;
-    }
+    if (item.adSlotRenderer) continue;
     if (!item.tileRenderer && item.lockupViewModel) continue;
     if (!item?.lockupViewModel?.contentType !== 'LOCKUP_CONTENT_TYPE_VIDEO') continue;
     if (configRead('enableDeArrow')) {

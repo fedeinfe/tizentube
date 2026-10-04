@@ -1,10 +1,9 @@
 name: Build TizenTube Standalone and Release
 
 
+# Needs the upstream Tizen signing certificate secrets, so it only runs on demand in this fork.
 on:
-  push:
-    tags:
-      - 'v*.*.*'
+  workflow_dispatch:
 
 jobs:
   build:

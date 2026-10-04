@@ -3,7 +3,7 @@ import { configChangeEmitter, configRead } from '../config.js';
 configChangeEmitter.addEventListener('configChange', (event) => {
     const { key, value } = event.detail;
     if (key === 'enableWhoIsWatchingMenu') {
-        disableWhosWatching(value);
+        safeDisableWhosWatching(value);
     }
 });
 
@@ -45,4 +45,14 @@ function disableWhosWatching(value) {
     }
 }
 
-disableWhosWatching(configRead('enableWhoIsWatchingMenu'));
+// The recurring actions are missing until YouTube has stored them (e.g. on a fresh
+// install). Throwing here would stop every module loaded after this one.
+function safeDisableWhosWatching(value) {
+    try {
+        disableWhosWatching(value);
+    } catch (e) {
+        console.error('TizenTube: could not update the Who\'s Watching menu:', e);
+    }
+}
+
+safeDisableWhosWatching(configRead('enableWhoIsWatchingMenu'));

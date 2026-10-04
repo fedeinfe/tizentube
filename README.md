@@ -1,4 +1,12 @@
 # ▶️ TizenTube
+
+> **Fork di [reisxd/TizenTube](https://github.com/reisxd/TizenTube)** con il blocco della pubblicità di YouTube aggiornato.
+>
+> **Installazione da TizenBrew:** Module Manager → *Add GitHub Module* → scrivi `fedeinfe/TizenTube`.
+> Se hai già installato il TizenTube originale (`@foxreis/tizentube`), rimuovilo per non avere due moduli.
+>
+> **Ricompilare `dist/`** dopo una modifica: `cd mods && npm install && npm run build` (e `cd service && npm install && npx rollup -c` per il servizio).
+> La cartella `dist/` è inclusa nella repo perché TizenBrew scarica i moduli GitHub da jsDelivr.
 <p align="center">
     <img width="600px" src=".github/assets/TizenTube Standalone Banner.png">
     <br>
